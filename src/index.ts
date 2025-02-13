@@ -1,101 +1,118 @@
-import express, { Express, Request, Response } from 'express';
-import { generateHash, hashFunction, getPort, addHashToRing, removeHashFromRing } from './consistentHashing';
+import express, { Request, Response } from 'express';
+import { generateHash, getPort, addHashToRing, removeHashFromRing } from './consistentHashing';
 import bodyParser from 'body-parser';
 import axios from 'axios';
 
-// Define interfaces for the expected structure of request bodies
+const HEALTH_CHECK_TIMEOUT = Number(process.env.HEALTH_CHECK_TIMEOUT) || 1000;
+
 interface StartServerRequest {
     port: number;
-    ringValue: number;
 }
 
 interface StopServerRequest {
     port: number;
 }
 
+async function checkHealth(port: number): Promise<boolean> {
+    try {
+        const response = await axios.get(`http://localhost:${port}/healthCheck`, {
+            timeout: HEALTH_CHECK_TIMEOUT,
+        });
+        return response.status === 200;
+    } catch (error) {
+        return false;
+    }
+}
+
+async function performHealthChecks() {
+    const portsToCheck = Array.from(activePorts);
+
+    for (const port of portsToCheck) {
+        const isHealthy = await checkHealth(port);
+
+        if (!isHealthy) {
+            console.log(`Server on port ${port} is unhealthy. Removing from active servers.`);
+
+            activePorts.delete(port);
+            const positions = generateHash(port);
+            removeHashFromRing(positions);
+        } else {
+            console.log(`Server on port ${port} is healthy.`);
+        }
+    }
+    console.log('Health checks completed.Active servers:', activePorts);
+}
+
+function startHealthChecks() {
+    setInterval(performHealthChecks, 5000);
+}
+
+startHealthChecks();
+
 const app = express();
-
 app.use(bodyParser.json());
-const port = 5000;
+const port = process.env.PORT || 5000;
 
-const servers = new Map<number, { app: Express; httpServer: any }>();
+const activePorts = new Set<number>();
 
-app.post('/startNewServer', (req: Request, res: Response) => {
-    const { port, ringValue }: StartServerRequest = req.body;
+async function forwardRequestToServer(req: Request, res: Response) {
+    const targetPort = await getPort();
 
-    if (!port || !ringValue || servers.has(port)) {
-        res.status(400).send('Incorrect input');
-        return;
+    if (!targetPort) {
+        return res.status(500).send('No active servers available');
     }
 
-    const positions = generateHash(port, ringValue);
+    try {
+        const response = await axios({
+            method: req.method,
+            url: `http://localhost:${targetPort}${req.originalUrl}`,
+            headers: req.headers,
+            data: req.body,
+        });
+
+        res.status(response.status).send(response.data);
+    } catch (error) {
+        console.error('Error forwarding the request:', error);
+        res.status(500).send('Error in making the request to the server');
+    }
+}
+
+app.post('/addPort', (req: Request, res: Response) => {
+    const { port }: StartServerRequest = req.body;
+
+    if (activePorts.has(port)) {
+        res.status(400).send('Port is already in use');
+    }
+
+    activePorts.add(port);
+    const positions = generateHash(port);
     addHashToRing(positions, port);
 
-    const newServerApp = express();
-    newServerApp.get('/testing', (req: Request, res: Response) => {
-        res.send(`server running on port ${port}`);
-    });
-
     res.status(200).send(`Server creation requested on port ${port}`);
-
-    const httpServer = newServerApp.listen(port, () => {
-        console.log(`Server started on port ${port}`);
-    });
-
-    console.log('Adding server');
-    servers.set(port, { app: newServerApp, httpServer });
-    console.log('Total Servers: ' + servers.size);
 });
 
-app.post('/stopServer', (req: Request, res: Response) => {
+app.delete('/removePort', (req: Request, res: Response) => {
     const { port }: StopServerRequest = req.body;
 
-    if (!port) {
-        res.status(400).send('Port is required');
-        return;
+    if (!activePorts.has(port)) {
+        res.status(400).send('Port is not found');
     }
 
+    activePorts.delete(port);
     const positions = generateHash(port);
     removeHashFromRing(positions);
-
-    const server = servers.get(port);
-    if (!server) {
-        res.status(404).send('Server not found');
-        return;
-    }
-
-    console.log('Closing server');
-
-    server.httpServer.close(() => {
-        console.log(`Server on port ${port} closed successfully.`);
-        servers.delete(port); // Remove from the Map
-        console.log('Total Servers: ' + servers.size);
-    });
 
     res.send(`Server on port ${port} has been stopped.`);
 });
 
-app.get('/testing', async (req: Request, res: Response) => {
-    const port = getPort();
-    const server = servers.get(port);
-    if (!server) {
-        res.status(404).send('Server not found');
-        return;
-    }
-
-    try {
-        const response = await axios.get(`http://localhost:${port}/testing`);
-        res.send(response.data);
-    } catch (error) {
-        console.error('Error in making the request to the server:', error);
-        res.status(500).send('Error in making the request to the server');
-    }
+app.get('/healthCheck', async (req: Request, res: Response) => {
+    res.status(200).send('Healthy');
 });
 
-app.get('/', (req: Request, res: Response) => {
-    res.send('Welcome to my API');
+app.all('*', async (req: Request, res: Response) => {
+    await forwardRequestToServer(req, res);
 });
 
 app.listen(port, () => {
-    console.log('Running on port ' + port);
+    console.log('Load Balancer is running on port ' + port);
 });

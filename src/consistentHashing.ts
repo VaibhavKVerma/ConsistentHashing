@@ -13,19 +13,19 @@ const hashFunction = (value: string): number => {
 const generateHash = (port: number, ringValue: number = virtualNodesCount): number[] => {
     const positions: number[] = [];
     for (let i = 0; i < ringValue; i++) {
-        positions.push(hashFunction(port + "_" + i));
+        positions.push(hashFunction(port + '_' + i));
     }
     return positions;
 };
 
 const addHashToRing = (positions: number[], port: number): void => {
-    positions.forEach(element => {
+    positions.forEach((element) => {
         hashRing.set(element, port);
     });
 };
 
 const removeHashFromRing = (positions: number[]): void => {
-    positions.forEach(element => {
+    positions.forEach((element) => {
         hashRing.delete(element);
     });
 };
@@ -40,21 +40,15 @@ function upperBound(arr: number[], target: number): number {
     return n;
 }
 
-const getPort = (): number => {
+
+const getPort = async (): Promise<number> => {
     const key = Math.floor(Math.random() * totalHashRingValues);
-    const position = hashFunction(key + "");
+    const position = hashFunction(key + '');
     const servers = [...hashRing.keys()].sort((a, b) => a - b);
 
     const index = upperBound(servers, position);
     const port = index === servers.length ? hashRing.get(servers[0])! : hashRing.get(servers[index])!;
     return port;
-}
-
-export {
-    totalHashRingValues,
-    generateHash,
-    hashFunction,
-    addHashToRing,
-    removeHashFromRing,
-    getPort,
 };
+
+export { totalHashRingValues, generateHash, hashFunction, addHashToRing, removeHashFromRing, getPort };
